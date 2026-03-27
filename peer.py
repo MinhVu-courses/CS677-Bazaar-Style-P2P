@@ -29,6 +29,10 @@ def run_peer(config):
     host = config["host"]
     port = config["port"]
     neighbors = config["neighbors"]
+    role = config["role"]
+    product = config["product"]
+
+    print(f"Peer {peer_id} role={role} product={product}")
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((host, port))
@@ -68,7 +72,11 @@ def run_peer(config):
                 msg_type = message["type"]
 
                 if msg_type == "lookup":
-                    handle_lookup(message, peer_id, neighbors, seen_requests)
+                    handle_lookup(
+                        message, peer_id, neighbors, seen_requests, role, product
+                    )
+                if msg_type == "reply":
+                    handle_reply(message, peer_id, neighbors)
             except socket.timeout:
                 continue
     except KeyboardInterrupt:
@@ -85,7 +93,7 @@ def send_message(host, port, msg_dict):
     s.close()
 
 
-def handle_lookup(message, peer_id, neighbors, seen_requests):
+def handle_lookup(message, peer_id, neighbors, seen_requests, role, product):
     request_id = message["request_id"]
 
     # if request has already been seen
@@ -95,10 +103,33 @@ def handle_lookup(message, peer_id, neighbors, seen_requests):
 
     seen_requests.add(request_id)
 
+    current_path = message["path"] + [peer_id]
+
     print(
         f"Peer {peer_id} received lookup for {message['product_name']} "
         f"with hopcount={message['hopcount']} path={message['path']}"
     )
+
+    # If I am a matching seller, send reply back along reverse path
+    if role == "seller" and product == message["product_name"]:
+        # generate reply
+        reply_msg = {
+            "type": "reply",
+            "seller_id": peer_id,
+            "buyer_id": message["buyer_id"],
+            "product_name": message["product_name"],
+            "path": current_path,
+            "request_id": message["request_id"],
+        }
+
+        if len(current_path) >= 2:
+            next_peer_id = current_path[-2]
+
+            for neighbor in neighbors:
+                if neighbor["peer_id"] == next_peer_id:
+                    send_message(neighbor["host"], neighbor["port"], reply_msg)
+                    print(f"Seller {peer_id} sent reply toward peer {next_peer_id}")
+                    break
 
     if message["hopcount"] == 0:
         print(f"Peer {peer_id} dropping lookup {request_id} because hopcount reached 0")
@@ -126,3 +157,24 @@ def handle_lookup(message, peer_id, neighbors, seen_requests):
         print(
             f"Peer {peer_id} forwarded lookup {request_id} to peer {neighbor['peer_id']}"
         )
+
+
+def handle_reply(message, peer_id, neighbors):
+    path = message["path"]
+
+    if peer_id == message["buyer_id"]:
+        # For testing purpose first
+        print(
+            f"Buyer {peer_id} received reply from seller {message['seller_id']} "
+            f"for product {message['product_name']}"
+        )
+        return
+
+    my_index = path.index(peer_id)
+    next_peer_id = path[my_index - 1]  # move backward toward buyer
+
+    for neighbor in neighbors:
+        if neighbor["peer_id"] == next_peer_id:
+            send_message(neighbor["host"], neighbor["port"], message)
+            print(f"Peer {peer_id} forwarded reply to peer {next_peer_id}")
+            return

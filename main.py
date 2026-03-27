@@ -36,6 +36,15 @@ if __name__ == "__main__":
     N = 6
     peer_configs = build_ring_topology(N)
 
+    # assigning roles
+    for peer in peer_configs:
+        peer["role"] = "relay"
+        peer["product"] = None
+
+    # TODO: Testing with 3rd process
+    peer_configs[3]["role"] = "seller"
+    peer_configs[3]["product"] = "fish"
+
     processes = []
     try:
         for config in peer_configs:

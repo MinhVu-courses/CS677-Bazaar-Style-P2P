@@ -1,5 +1,6 @@
 from multiprocessing import Process
 from peer import run_peer
+import random
 
 BASE_PORT = 5000
 
@@ -36,14 +37,22 @@ if __name__ == "__main__":
     N = 6
     peer_configs = build_ring_topology(N)
 
-    # assigning roles
-    for peer in peer_configs:
-        peer["role"] = "relay"
-        peer["product"] = None
+    products = ["fish", "salt", "boar"]
 
-    # TODO: Testing with 3rd process
-    peer_configs[3]["role"] = "seller"
-    peer_configs[3]["product"] = "fish"
+    # assigning roles
+    # make sure there is at least one buyer and one seller
+    roles = ["buyer", "seller"]
+    while len(roles) < N:
+        roles.append(random.choice(["buyer", "seller"]))
+
+    random.shuffle(roles)
+
+    for i, peer in enumerate(peer_configs):
+        peer["role"] = roles[i]
+        if roles[i] == "seller":
+            peer["product"] = random.choice(products)
+        else:
+            peer["product"] = None
 
     processes = []
     try:

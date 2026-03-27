@@ -1,5 +1,6 @@
 import socket
 import time
+import random
 import json
 import threading
 from datetime import datetime
@@ -11,12 +12,6 @@ def log(msg):
 
 
 def run_peer(config):
-    seen_requests = set()
-    seen_lock = threading.Lock()
-
-    seller_state = {"stock": 2}
-    stock_lock = threading.Lock()
-
     replies = []
 
     peer_id = config["peer_id"]
@@ -24,9 +19,18 @@ def run_peer(config):
     port = config["port"]
     neighbors = config["neighbors"]
     role = config["role"]
-    product = config["product"]
+    # product = config["product"]
 
-    log(f"Peer {peer_id} role={role} product={product}")
+    seen_requests = set()
+    seen_lock = threading.Lock()
+
+    seller_state = {"stock": 2 if role == "seller" else 0, "product": config["product"]}
+    stock_lock = threading.Lock()
+
+    completed_buys = set()
+    completed_lock = threading.Lock()
+
+    log(f"Peer {peer_id} role={role} product={seller_state['product']}")
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -39,19 +43,13 @@ def run_peer(config):
 
     time.sleep(2)
 
-    if peer_id == 0:
-        lookup_msg = {
-            "type": "lookup",
-            "buyer_id": 0,
-            "product_name": "fish",
-            "hopcount": 3,
-            "path": [0],
-            "request_id": "0-fish-1",
-        }
-
-        for neighbor in neighbors:
-            send_message(neighbor["host"], neighbor["port"], lookup_msg)
-            log(f"Peer 0 sent lookup to peer {neighbor['peer_id']}")
+    if role == "buyer":
+        t = threading.Thread(
+            target=buyer_loop,
+            args=(peer_id, neighbors),
+            daemon=True,
+        )
+        t.start()
 
     try:
         while True:
@@ -69,10 +67,11 @@ def run_peer(config):
                         seen_requests,
                         seen_lock,
                         role,
-                        product,
                         replies,
                         seller_state,
                         stock_lock,
+                        completed_buys,
+                        completed_lock,
                     ),
                     daemon=True,
                 )
@@ -103,7 +102,7 @@ def handle_lookup(
     seen_requests,
     seen_lock,
     role,
-    product,
+    seller_state,
 ):
     request_id = message["request_id"]
 
@@ -120,7 +119,11 @@ def handle_lookup(
         f"with hopcount={message['hopcount']} path={current_path}"
     )
 
-    if role == "seller" and product == message["product_name"]:
+    if (
+        role == "seller"
+        and seller_state["product"] == message["product_name"]
+        and seller_state["stock"] > 0
+    ):
         reply_msg = {
             "type": "reply",
             "seller_id": peer_id,
@@ -166,7 +169,7 @@ def handle_lookup(
         )
 
 
-def handle_reply(message, peer_id, neighbors, replies):
+def handle_reply(message, peer_id, neighbors, replies, completed_buys, completed_lock):
     path = message["path"]
 
     if peer_id == message["buyer_id"]:
@@ -177,17 +180,27 @@ def handle_reply(message, peer_id, neighbors, replies):
 
         replies.append(message["seller_id"])
 
+        with completed_lock:
+            if message["request_id"] in completed_buys:
+                log(
+                    f"Buyer {peer_id} already completed buy for {message['request_id']}"
+                )
+                return
+            completed_buys.add(message["request_id"])
+
         buy_msg = {
             "type": "buy",
             "buyer_id": peer_id,
             "seller_id": message["seller_id"],
             "product_name": message["product_name"],
+            "request_id": message["request_id"],
         }
 
         send_message(message["seller_host"], message["seller_port"], buy_msg)
         log(f"Buyer {peer_id} sent buy to seller {message['seller_id']}")
         return
 
+    # unsure if I should remove this part or not?
     my_index = path.index(peer_id)
     next_peer_id = path[my_index - 1]
 
@@ -198,23 +211,32 @@ def handle_reply(message, peer_id, neighbors, replies):
             return
 
 
-def handle_buy(message, peer_id, role, product, seller_state, stock_lock):
+def handle_buy(message, peer_id, role, seller_state, stock_lock):
     if role != "seller":
         return
 
     if peer_id != message["seller_id"]:
         return
 
-    if product != message["product_name"]:
+    if seller_state["product"] != message["product_name"]:
         return
 
     with stock_lock:
         if seller_state["stock"] > 0:
             seller_state["stock"] -= 1
             log(
-                f"Seller {peer_id} sold {product} to buyer {message['buyer_id']} "
+                f"Seller {peer_id} sold {seller_state['product']} to buyer {message['buyer_id']} "
                 f"(remaining={seller_state['stock']})"
             )
+
+            if seller_state["stock"] == 0:
+                new_product = random.choice(["fish", "salt", "boar"])
+                seller_state["product"] = new_product
+                seller_state["stock"] = 2
+                log(
+                    f"Seller {peer_id} switched to {new_product} "
+                    f"with restocked stock={seller_state['stock']}"
+                )
         else:
             log(f"Seller {peer_id} OUT OF STOCK")
 
@@ -228,10 +250,11 @@ def process_connection(
     seen_requests,
     seen_lock,
     role,
-    product,
     replies,
     seller_state,
     stock_lock,
+    completed_buys,
+    completed_lock,
 ):
     try:
         data = conn.recv(4096)
@@ -251,11 +274,39 @@ def process_connection(
                 seen_requests,
                 seen_lock,
                 role,
-                product,
+                seller_state,
             )
         elif msg_type == "reply":
-            handle_reply(message, peer_id, neighbors, replies)
+            handle_reply(
+                message, peer_id, neighbors, replies, completed_buys, completed_lock
+            )
         elif msg_type == "buy":
-            handle_buy(message, peer_id, role, product, seller_state, stock_lock)
+            handle_buy(message, peer_id, role, seller_state, stock_lock)
     finally:
         conn.close()
+
+
+def buyer_loop(peer_id, neighbors):
+    products = ["fish", "salt"]
+
+    for request_num in range(1, 11):
+        product_name = random.choice(products)
+
+        lookup_msg = {
+            "type": "lookup",
+            "buyer_id": peer_id,
+            "product_name": product_name,
+            "hopcount": 3,
+            "path": [peer_id],
+            "request_id": f"{peer_id}-{product_name}-{request_num}",
+        }
+
+        for neighbor in neighbors:
+            send_message(neighbor["host"], neighbor["port"], lookup_msg)
+            log(
+                f"Buyer {peer_id} sent lookup {lookup_msg['request_id']} "
+                f"for {product_name} to peer {neighbor['peer_id']}"
+            )
+
+        request_num += 1
+        time.sleep(random.uniform(2, 4))

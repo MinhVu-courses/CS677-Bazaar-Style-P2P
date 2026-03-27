@@ -7,22 +7,13 @@ def run_peer(config):
     """
     Right now, this place feels like a hub that process request
 
-        Inside here, we also defined message type:
-        {
-                "type": "lookup",
-                "buyer_id": 0,
-                "product_name": "fish",
-                "hopcount": 3,
-                "path": [0],
-                "request_id": "0-fish-1"
-        }
-
-
         Args:
                 config (_type_): _description_
     """
     # data structures
     seen_requests = set()
+    seller_state = {"stock": 2}  # maybe for testing
+    replies = []
 
     # data processing
     peer_id = config["peer_id"]
@@ -73,10 +64,19 @@ def run_peer(config):
 
                 if msg_type == "lookup":
                     handle_lookup(
-                        message, peer_id, neighbors, seen_requests, role, product
+                        message,
+                        peer_id,
+                        neighbors,
+                        seen_requests,
+                        role,
+                        product,
+                        host,
+                        port,
                     )
-                if msg_type == "reply":
-                    handle_reply(message, peer_id, neighbors)
+                elif msg_type == "reply":
+                    handle_reply(message, peer_id, neighbors, replies)
+                elif msg_type == "buy":
+                    handle_buy(message, peer_id, role, product, seller_state)
             except socket.timeout:
                 continue
     except KeyboardInterrupt:
@@ -93,7 +93,9 @@ def send_message(host, port, msg_dict):
     s.close()
 
 
-def handle_lookup(message, peer_id, neighbors, seen_requests, role, product):
+def handle_lookup(
+    message, peer_id, neighbors, seen_requests, role, product, host, port
+):
     request_id = message["request_id"]
 
     # if request has already been seen
@@ -116,6 +118,8 @@ def handle_lookup(message, peer_id, neighbors, seen_requests, role, product):
         reply_msg = {
             "type": "reply",
             "seller_id": peer_id,
+            "seller_host": host,
+            "seller_port": port,
             "buyer_id": message["buyer_id"],
             "product_name": message["product_name"],
             "path": current_path,
@@ -159,7 +163,7 @@ def handle_lookup(message, peer_id, neighbors, seen_requests, role, product):
         )
 
 
-def handle_reply(message, peer_id, neighbors):
+def handle_reply(message, peer_id, neighbors, replies):
     path = message["path"]
 
     if peer_id == message["buyer_id"]:
@@ -168,6 +172,21 @@ def handle_reply(message, peer_id, neighbors):
             f"Buyer {peer_id} received reply from seller {message['seller_id']} "
             f"for product {message['product_name']}"
         )
+
+        replies.append(message["seller_id"])
+
+        # simplest version: buy immediately from first reply
+        seller_id = message["seller_id"]
+        buy_msg = {
+            "type": "buy",
+            "buyer_id": peer_id,
+            "seller_id": seller_id,
+            "product_name": message["product_name"],
+        }
+
+        send_message(message["seller_host"], message["seller_port"], buy_msg)
+
+        print(f"Buyer {peer_id} sent buy to seller {message['seller_id']}")
         return
 
     my_index = path.index(peer_id)
@@ -178,3 +197,25 @@ def handle_reply(message, peer_id, neighbors):
             send_message(neighbor["host"], neighbor["port"], message)
             print(f"Peer {peer_id} forwarded reply to peer {next_peer_id}")
             return
+
+
+def handle_buy(message, peer_id, role, product, seller_state):
+    if role != "seller":
+        return
+
+    if peer_id != message["seller_id"]:
+        return
+
+    if product != message["product_name"]:
+        return
+
+    global stock
+
+    if seller_state["stock"] > 0:
+        seller_state["stock"] -= 1
+        print(
+            f"Seller {peer_id} sold {product} to buyer {message['buyer_id']} "
+            f"(remaining={seller_state['stock']})"
+        )
+    else:
+        print(f"Seller {peer_id} OUT OF STOCK")

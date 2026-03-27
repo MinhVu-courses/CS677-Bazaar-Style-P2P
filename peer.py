@@ -8,7 +8,7 @@ from datetime import datetime
 
 def log(msg):
     ts = datetime.now().strftime("%m.%d.%Y %H:%M:%S.%f")[:-3]
-    print(f"{ts} {msg}")
+    print(f"{ts} {msg}", flush=True)
 
 
 def run_peer(config):
@@ -19,12 +19,18 @@ def run_peer(config):
     port = config["port"]
     neighbors = config["neighbors"]
     role = config["role"]
-    # product = config["product"]
+
+    pending_requests = {}
+    pending_lock = threading.Lock()
+    latency_file = f"latency_peer_{peer_id}.csv"
 
     seen_requests = set()
     seen_lock = threading.Lock()
 
-    seller_state = {"stock": 2 if role == "seller" else 0, "product": config["product"]}
+    seller_state = {
+        "stock": 2 if role == "seller" else 0,
+        "product": config["product"],
+    }
     stock_lock = threading.Lock()
 
     completed_buys = set()
@@ -41,12 +47,15 @@ def run_peer(config):
     log(f"Peer {peer_id} listening on {host}:{port}")
     log(f"Peer {peer_id} neighbors: {[n['peer_id'] for n in neighbors]}")
 
-    time.sleep(2)
+    time.sleep(0.02)
 
     if role == "buyer":
+        with open(latency_file, "w") as f:
+            f.write("request_id,product_name,latency_ms\n")
+
         t = threading.Thread(
             target=buyer_loop,
-            args=(peer_id, neighbors),
+            args=(peer_id, neighbors, pending_requests, pending_lock, 100),
             daemon=True,
         )
         t.start()
@@ -72,6 +81,9 @@ def run_peer(config):
                         stock_lock,
                         completed_buys,
                         completed_lock,
+                        pending_requests,
+                        pending_lock,
+                        latency_file,
                     ),
                     daemon=True,
                 )
@@ -87,10 +99,13 @@ def run_peer(config):
 
 
 def send_message(host, port, msg_dict):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect((host, port))
-    s.sendall(json.dumps(msg_dict).encode())
-    s.close()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((host, port))
+        s.sendall(json.dumps(msg_dict).encode())
+        s.close()
+    except Exception as e:
+        log(f"send_message failed to {host}:{port}: {e}")
 
 
 def handle_lookup(
@@ -169,7 +184,17 @@ def handle_lookup(
         )
 
 
-def handle_reply(message, peer_id, neighbors, replies, completed_buys, completed_lock):
+def handle_reply(
+    message,
+    peer_id,
+    neighbors,
+    replies,
+    completed_buys,
+    completed_lock,
+    pending_requests,
+    pending_lock,
+    latency_file,
+):
     path = message["path"]
 
     if peer_id == message["buyer_id"]:
@@ -188,6 +213,16 @@ def handle_reply(message, peer_id, neighbors, replies, completed_buys, completed
                 return
             completed_buys.add(message["request_id"])
 
+        with pending_lock:
+            req = pending_requests.get(message["request_id"])
+
+        if req is not None:
+            latency_ms = (time.time() - req["start_time"]) * 1000.0
+            with open(latency_file, "a") as f:
+                f.write(
+                    f"{message['request_id']},{message['product_name']},{latency_ms:.3f}\n"
+                )
+
         buy_msg = {
             "type": "buy",
             "buyer_id": peer_id,
@@ -200,7 +235,6 @@ def handle_reply(message, peer_id, neighbors, replies, completed_buys, completed
         log(f"Buyer {peer_id} sent buy to seller {message['seller_id']}")
         return
 
-    # unsure if I should remove this part or not?
     my_index = path.index(peer_id)
     next_peer_id = path[my_index - 1]
 
@@ -255,6 +289,9 @@ def process_connection(
     stock_lock,
     completed_buys,
     completed_lock,
+    pending_requests,
+    pending_lock,
+    latency_file,
 ):
     try:
         data = conn.recv(4096)
@@ -278,7 +315,15 @@ def process_connection(
             )
         elif msg_type == "reply":
             handle_reply(
-                message, peer_id, neighbors, replies, completed_buys, completed_lock
+                message,
+                peer_id,
+                neighbors,
+                replies,
+                completed_buys,
+                completed_lock,
+                pending_requests,
+                pending_lock,
+                latency_file,
             )
         elif msg_type == "buy":
             handle_buy(message, peer_id, role, seller_state, stock_lock)
@@ -286,10 +331,10 @@ def process_connection(
         conn.close()
 
 
-def buyer_loop(peer_id, neighbors):
-    products = ["fish", "salt"]
+def buyer_loop(peer_id, neighbors, pending_requests, pending_lock, num_requests=10):
+    products = ["fish", "salt", "boar"]
 
-    for request_num in range(1, 11):
+    for request_num in range(1, num_requests + 1):
         product_name = random.choice(products)
 
         lookup_msg = {
@@ -301,6 +346,13 @@ def buyer_loop(peer_id, neighbors):
             "request_id": f"{peer_id}-{product_name}-{request_num}",
         }
 
+        send_time = time.time()
+        with pending_lock:
+            pending_requests[lookup_msg["request_id"]] = {
+                "start_time": send_time,
+                "product_name": product_name,
+            }
+
         for neighbor in neighbors:
             send_message(neighbor["host"], neighbor["port"], lookup_msg)
             log(
@@ -308,5 +360,4 @@ def buyer_loop(peer_id, neighbors):
                 f"for {product_name} to peer {neighbor['peer_id']}"
             )
 
-        request_num += 1
         time.sleep(random.uniform(2, 4))

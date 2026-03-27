@@ -1,0 +1,8 @@
+request_id,product_name,latency_ms
+0-salt-1,salt,17.168
+0-fish-3,fish,3.620
+0-boar-4,boar,2.013
+0-salt-5,salt,2.521
+0-salt-7,salt,3.006
+0-fish-8,fish,2.125
+0-boar-11,boar,2.154

@@ -1,0 +1,8 @@
+Samples: 25
+Average latency: 3.516 ms
+Min latency: 0.504 ms
+Max latency: 17.168 ms
+
+Latency histogram:
+000-009 ms | ######################## (24)
+010-019 ms | # (1)

@@ -1,8 +1,10 @@
 from multiprocessing import Process
 from peer import run_peer
 import random
+import time
 
 BASE_PORT = 5000
+RUN_DURATION = 30  # seconds
 
 
 def build_ring_topology(n):
@@ -39,12 +41,10 @@ if __name__ == "__main__":
 
     products = ["fish", "salt", "boar"]
 
-    # assigning roles
-    # make sure there is at least one buyer and one seller
+    # random role assignment, guaranteeing at least one buyer and one seller
     roles = ["buyer", "seller"]
     while len(roles) < N:
         roles.append(random.choice(["buyer", "seller"]))
-
     random.shuffle(roles)
 
     for i, peer in enumerate(peer_configs):
@@ -53,6 +53,12 @@ if __name__ == "__main__":
             peer["product"] = random.choice(products)
         else:
             peer["product"] = None
+            # if i == 0:
+            #     peer["role"] = "buyer"
+            #     peer["product"] = None
+            # else:
+            #     peer["role"] = "seller"
+            #     peer["product"] = random.choice(products)
 
     processes = []
     try:
@@ -61,8 +67,18 @@ if __name__ == "__main__":
             p.start()
             processes.append(p)
 
+        print(f"Experiment running for {RUN_DURATION} seconds...")
+        time.sleep(RUN_DURATION)
+
+        print("\nExperiment finished. Stopping all peer processes...")
+        for p in processes:
+            if p.is_alive():
+                p.terminate()
+
         for p in processes:
             p.join()
+
+        print("All peers stopped.")
 
     except KeyboardInterrupt:
         print("\nStopping all peer processes...")
